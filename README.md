@@ -60,5 +60,8 @@ To run the application, you primarily need:
 3.  Your web browser should automatically open to the application's interface (typically `http://localhost:8501`).
 4.  Use the tabs ("Existing Summaries", "Live Summary Conversion", "Genre Prediction") to interact with the different features.
 
+## Project Overview
 
-![alt text](<Screenshot from 2025-07-20 14-05-57.png>) ![alt text](<Screenshot from 2025-07-20 14-01-29.png>) ![alt text](<Screenshot from 2025-07-20 14-00-36.png>)
+<img width="1782" height="654" alt="Screenshot from 2025-07-20 14-00-36" src="https://github.com/user-attachments/assets/ab38d188-48f4-4d1e-afd0-3e995cd057f0" />
+<img width="1770" height="826" alt="Screenshot from 2025-07-20 14-01-29" src="https://github.com/user-attachments/assets/a2cc1601-5f17-4971-b16a-fb9f7e425aa5" />
+<img width="1900" height="958" alt="Screenshot from 2025-07-20 14-05-57" src="https://github.com/user-attachments/assets/4af54fdd-8f02-400c-97aa-efb364fef277" />
