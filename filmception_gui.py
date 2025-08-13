@@ -16,6 +16,19 @@ from tensorflow.keras.models import Model
 from sklearn.preprocessing import MultiLabelBinarizer
 import numpy as np
 
+# Optional speech-to-text backends
+try:
+    import whisper
+    WHISPER_AVAILABLE = True
+except Exception:
+    WHISPER_AVAILABLE = False
+
+try:
+    import speech_recognition as sr
+    SR_AVAILABLE = True
+except Exception:
+    SR_AVAILABLE = False
+
 # Set page configuration
 st.set_page_config(
     page_title="Filmception",
@@ -69,11 +82,11 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Paths
-TRANSLATION_DIR = Path("/home/muhammad-usman/AI_Project/translation")
-AUDIO_DIR = Path("/home/muhammad-usman/AI_Project/Audiofiles")
+# Paths (configurable via env vars for containerized deployments)
+TRANSLATION_DIR = Path(os.getenv("FILMCEPTION_TRANSLATION_DIR", str(Path(__file__).parent / "translation")))
+AUDIO_DIR = Path(os.getenv("FILMCEPTION_AUDIO_DIR", str(Path(__file__).parent / "audio")))
 ALL_TRANSLATIONS_FILE = TRANSLATION_DIR / "all_translations.json"
-MODEL_DIR = Path("/home/muhammad-usman/AI_Project/final_model")
+MODEL_DIR = Path(os.getenv("FILMCEPTION_MODEL_DIR", str(Path(__file__).parent / "model")))
 
 # Language code mapping for translation and gTTS
 language_codes = {
@@ -85,14 +98,30 @@ language_codes = {
     'French': 'fr'
 }
 
+# Speech recognition language codes (for SpeechRecognition Google backend)
+speech_recognition_lang_codes = {
+    'English': 'en-US',
+    'Arabic': 'ar-SA',
+    'Urdu': 'ur-PK',
+    'Korean': 'ko-KR',
+    'Spanish': 'es-ES',
+    'French': 'fr-FR'
+}
+
 # Initialize translator
 translator = Translator()
 
 # Function to load translations
 @st.cache_data
 def load_translations():
-    with open(ALL_TRANSLATIONS_FILE, 'r', encoding='utf-8') as f:
-        return json.load(f)
+    try:
+        if not ALL_TRANSLATIONS_FILE.exists():
+            return {}
+        with open(ALL_TRANSLATIONS_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception as e:
+        st.error(f"Failed to load translations: {e}")
+        return {}
 
 # Function to get audio file path for existing translations
 def get_audio_file_path(movie_id, language):
@@ -131,6 +160,42 @@ def text_to_speech(text, language_code):
         return temp_file.name
     except Exception as e:
         st.error(f"Error generating audio: {e}")
+        return None
+
+# Helper to persist uploaded files temporarily
+def save_uploaded_file_to_temp(uploaded_file, suffix=None):
+    try:
+        suffix = suffix or os.path.splitext(uploaded_file.name)[1]
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+        temp_file.write(uploaded_file.read())
+        temp_file.flush()
+        temp_file.close()
+        return temp_file.name
+    except Exception as e:
+        st.error(f"Failed to persist uploaded file: {e}")
+        return None
+
+# Transcribe audio using Whisper if available, otherwise SpeechRecognition (WAV/AIFF/FLAC only)
+def transcribe_audio_file(file_path, source_language=None):
+    try:
+        if WHISPER_AVAILABLE:
+            # Prefer compact model for latency
+            model = whisper.load_model("base")
+            whisper_lang = language_codes.get(source_language) if source_language else None
+            result = model.transcribe(file_path, language=whisper_lang)
+            return result.get('text', '').strip()
+        elif SR_AVAILABLE:
+            if not file_path.lower().endswith((".wav", ".aiff", ".aif", ".flac")):
+                raise RuntimeError("SpeechRecognition requires WAV/AIFF/FLAC. Use one of these formats or install 'openai-whisper'.")
+            recognizer = sr.Recognizer()
+            with sr.AudioFile(file_path) as source:
+                audio = recognizer.record(source)
+            sr_lang = speech_recognition_lang_codes.get(source_language, 'en-US')
+            return recognizer.recognize_google(audio, language=sr_lang)
+        else:
+            raise RuntimeError("No speech-to-text backend available. Install 'openai-whisper' or 'SpeechRecognition'.")
+    except Exception as e:
+        st.error(f"Transcription error: {e}")
         return None
 
 # Custom F1 Score metric class for model reconstruction
@@ -283,124 +348,127 @@ def main():
     st.markdown('<div class="sub-header">Multilingual Movie Summary Translator</div>', unsafe_allow_html=True)
 
     # Create tabs
-    tab1, tab2, tab3 = st.tabs(["Existing Summaries", "Live Summary Conversion", "Genre Prediction"])
+    tab1, tab2, tab3, tab4 = st.tabs(["Existing Summaries", "Live Summary Conversion", "Genre Prediction", "Upload, Translate & TTS"])
 
     # Tab 1: Existing Summaries (original functionality)
     with tab1:
         # Load translations
         translations = load_translations()
-        movie_ids = list(translations.keys())
-        
-        # Sidebar
-        with st.sidebar:
-            st.markdown("## Movie Selection")
-            st.markdown("Select a movie to view its translated summaries and listen to audio.")
-            
-            selected_movie_index = st.selectbox(
-                "Choose a movie:",
-                options=range(len(movie_ids)),
-                format_func=lambda x: f"Movie {x+1}: {translations[movie_ids[x]]['original'][:50]}...",
-            )
-            
-            selected_movie_id = movie_ids[selected_movie_index]
-            
-            st.markdown("---")
-            
-            st.markdown("## Language Settings")
-            st.markdown("Select languages for translation and audio playback.")
-            
-            translation_language = st.radio(
-                "View translation in:",
-                options=["Original", "Arabic", "Urdu", "Korean"],
-                index=0,
-            )
-            
-            audio_language = st.radio(
-                "Play audio in:",
-                options=["Arabic", "Urdu", "Korean"],
-                index=0,
-            )
-            
-            st.markdown("---")
-            st.markdown("## About Filmception")
-            st.markdown("""
-            Filmception is an AI-powered multilingual movie summary 
-            translator and genre classifier built for the Artificial 
-            Intelligence Spring 2025 Semester Project.
-            """)
-        
-        # Main content
-        selected_movie = translations[selected_movie_id]
-        
-        st.markdown('<div class="movie-container">', unsafe_allow_html=True)
-        
-        st.markdown(f'<div class="movie-title">Movie ID: {selected_movie_id}</div>', unsafe_allow_html=True)
-        
-        if translation_language == "Original":
-            st.markdown('<div class="section-title">Original Summary:</div>', unsafe_allow_html=True)
-            st.markdown(f"<p>{selected_movie['original']}</p>", unsafe_allow_html=True)
+        if not translations:
+            st.info("No preloaded translations found. Use the Upload tab or Live Conversion to generate content.")
         else:
-            st.markdown(f'<div class="section-title">{translation_language} Translation:</div>', unsafe_allow_html=True)
-            st.markdown(f"<p>{selected_movie['translations'][translation_language]}</p>", unsafe_allow_html=True)
-        
-        st.markdown('</div>', unsafe_allow_html=True)
-        
-        st.markdown('<div class="movie-container">', unsafe_allow_html=True)
-        st.markdown(f'<div class="section-title">Audio Playback - {audio_language}</div>', unsafe_allow_html=True)
-        
-        audio_file_path = get_audio_file_path(selected_movie_id, audio_language)
-        
-        if os.path.exists(audio_file_path):
-            st.audio(str(audio_file_path))
-        else:
-            st.warning(f"Audio file not found for Movie ID {selected_movie_id} in {audio_language}")
-        
-        st.markdown('</div>', unsafe_allow_html=True)
-        
-        with st.expander("Additional Features", expanded=False):
-            st.markdown('<div class="section-title">Compare All Translations</div>', unsafe_allow_html=True)
+            movie_ids = list(translations.keys())
             
-            col1, col2, col3 = st.columns(3)
+            # Sidebar
+            with st.sidebar:
+                st.markdown("## Movie Selection")
+                st.markdown("Select a movie to view its translated summaries and listen to audio.")
+                
+                selected_movie_index = st.selectbox(
+                    "Choose a movie:",
+                    options=range(len(movie_ids)),
+                    format_func=lambda x: f"Movie {x+1}: {translations[movie_ids[x]]['original'][:50]}...",
+                )
+                
+                selected_movie_id = movie_ids[selected_movie_index]
+                
+                st.markdown("---")
+                
+                st.markdown("## Language Settings")
+                st.markdown("Select languages for translation and audio playback.")
+                
+                translation_language = st.radio(
+                    "View translation in:",
+                    options=["Original", "Arabic", "Urdu", "Korean"],
+                    index=0,
+                )
+                
+                audio_language = st.radio(
+                    "Play audio in:",
+                    options=["Arabic", "Urdu", "Korean"],
+                    index=0,
+                )
+                
+                st.markdown("---")
+                st.markdown("## About Filmception")
+                st.markdown("""
+                Filmception is an AI-powered multilingual movie summary 
+                translator and genre classifier built for the Artificial 
+                Intelligence Spring 2025 Semester Project.
+                """)
             
-            with col1:
-                st.markdown("<b>Arabic</b>", unsafe_allow_html=True)
-                st.markdown(f"<p>{selected_movie['translations']['Arabic']}</p>", unsafe_allow_html=True)
+            # Main content
+            selected_movie = translations[selected_movie_id]
             
-            with col2:
-                st.markdown("<b>Urdu</b>", unsafe_allow_html=True)
-                st.markdown(f"<p>{selected_movie['translations']['Urdu']}</p>", unsafe_allow_html=True)
+            st.markdown('<div class="movie-container">', unsafe_allow_html=True)
             
-            with col3:
-                st.markdown("<b>Korean</b>", unsafe_allow_html=True)
-                st.markdown(f"<p>{selected_movie['translations']['Korean']}</p>", unsafe_allow_html=True)
+            st.markdown(f'<div class="movie-title">Movie ID: {selected_movie_id}</div>', unsafe_allow_html=True)
             
-            st.markdown('<div class="section-title">Compare All Audio Files</div>', unsafe_allow_html=True)
+            if translation_language == "Original":
+                st.markdown('<div class="section-title">Original Summary:</div>', unsafe_allow_html=True)
+                st.markdown(f"<p>{selected_movie['original']}</p>", unsafe_allow_html=True)
+            else:
+                st.markdown(f'<div class="section-title">{translation_language} Translation:</div>', unsafe_allow_html=True)
+                st.markdown(f"<p>{selected_movie['translations'][translation_language]}</p>", unsafe_allow_html=True)
             
-            audio_col1, audio_col2, audio_col3 = st.columns(3)
+            st.markdown('</div>', unsafe_allow_html=True)
             
-            with audio_col1:
-                st.markdown("<b>Arabic Audio</b>", unsafe_allow_html=True)
-                arabic_audio_path = get_audio_file_path(selected_movie_id, "Arabic")
-                if os.path.exists(arabic_audio_path):
-                    st.audio(str(arabic_audio_path))
-                else:
-                    st.warning("Arabic audio not found")
+            st.markdown('<div class="movie-container">', unsafe_allow_html=True)
+            st.markdown(f'<div class="section-title">Audio Playback - {audio_language}</div>', unsafe_allow_html=True)
             
-            with audio_col2:
-                st.markdown("<b>Urdu Audio</b>", unsafe_allow_html=True)
-                urdu_audio_path = get_audio_file_path(selected_movie_id, "Urdu")
-                if os.path.exists(urdu_audio_path):
-                    st.audio(str(urdu_audio_path))
-                else:
-                    st.warning("Urdu audio not found")
+            audio_file_path = get_audio_file_path(selected_movie_id, audio_language)
             
-            with audio_col3:
-                st.markdown("<b>Korean Audio</b>", unsafe_allow_html=True)
-                korean_audio_path = get_audio_file_path(selected_movie_id, "Korean")
-                if os.path.exists(korean_audio_path):
-                    st.audio(str(korean_audio_path))
-                else:
-                    st.warning("Korean audio not found")
+            if os.path.exists(audio_file_path):
+                st.audio(str(audio_file_path))
+            else:
+                st.warning(f"Audio file not found for Movie ID {selected_movie_id} in {audio_language}")
+            
+            st.markdown('</div>', unsafe_allow_html=True)
+            
+            with st.expander("Additional Features", expanded=False):
+                st.markdown('<div class="section-title">Compare All Translations</div>', unsafe_allow_html=True)
+                
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    st.markdown("<b>Arabic</b>", unsafe_allow_html=True)
+                    st.markdown(f"<p>{selected_movie['translations']['Arabic']}</p>", unsafe_allow_html=True)
+                
+                with col2:
+                    st.markdown("<b>Urdu</b>", unsafe_allow_html=True)
+                    st.markdown(f"<p>{selected_movie['translations']['Urdu']}</p>", unsafe_allow_html=True)
+                
+                with col3:
+                    st.markdown("<b>Korean</b>", unsafe_allow_html=True)
+                    st.markdown(f"<p>{selected_movie['translations']['Korean']}</p>", unsafe_allow_html=True)
+                
+                st.markdown('<div class="section-title">Compare All Audio Files</div>', unsafe_allow_html=True)
+                
+                audio_col1, audio_col2, audio_col3 = st.columns(3)
+                
+                with audio_col1:
+                    st.markdown("<b>Arabic Audio</b>", unsafe_allow_html=True)
+                    arabic_audio_path = get_audio_file_path(selected_movie_id, "Arabic")
+                    if os.path.exists(arabic_audio_path):
+                        st.audio(str(arabic_audio_path))
+                    else:
+                        st.warning("Arabic audio not found")
+                
+                with audio_col2:
+                    st.markdown("<b>Urdu Audio</b>", unsafe_allow_html=True)
+                    urdu_audio_path = get_audio_file_path(selected_movie_id, "Urdu")
+                    if os.path.exists(urdu_audio_path):
+                        st.audio(str(urdu_audio_path))
+                    else:
+                        st.warning("Urdu audio not found")
+                
+                with audio_col3:
+                    st.markdown("<b>Korean Audio</b>", unsafe_allow_html=True)
+                    korean_audio_path = get_audio_file_path(selected_movie_id, "Korean")
+                    if os.path.exists(korean_audio_path):
+                        st.audio(str(korean_audio_path))
+                    else:
+                        st.warning("Korean audio not found")
 
     # Tab 2: Live Summary Conversion
     with tab2:
@@ -484,8 +552,8 @@ def main():
                         # Create color-coded genre badges
                         genre_html = ""
                         genre_colors = {
-                            'Action': '#E57373',      # Light Red
-                            'ActionAdventure': '#E57373',
+                            'Action': '#E73',      # Light Red
+                            'ActionAdventure': '#E73',
                             'Adventure': '#81C784',   # Light Green
                             'Animation': '#64B5F6',   # Light Blue
                             'Blackandwhite': '#B0BEC5',
@@ -549,6 +617,104 @@ def main():
                                 st.markdown("No probability data available.")
                 else:
                     st.warning("Please enter a movie summary.")
+                    
+    # Tab 4: Upload, Translate & TTS
+    with tab4:
+        st.markdown("## Upload, Translate & TTS")
+        upload_mode = st.radio("What would you like to upload?", options=["Audio file", "Text summary"], index=0)
+
+        if upload_mode == "Audio file":
+            uploaded_audio = st.file_uploader(
+                "Upload an audio file (Whisper supports mp3/m4a/mp4/wav/flac; SpeechRecognition supports wav/aiff/flac)",
+                type=["mp3", "m4a", "mp4", "wav", "flac", "aiff", "aif", "ogg"]
+            )
+            source_language = st.selectbox(
+                "Source language (optional)",
+                options=list(language_codes.keys()),
+                index=0,
+                help="Used to guide STT. Leave as English or pick the actual language if known."
+            )
+            target_languages = st.multiselect(
+                "Target languages for translation",
+                options=list(language_codes.keys()),
+                default=["English", "Arabic", "Urdu", "Korean"]
+            )
+            generate_audio = st.checkbox("Generate audio for translated text", value=True)
+
+            if st.button("Transcribe and Translate"):
+                if uploaded_audio is None:
+                    st.warning("Please upload an audio file.")
+                else:
+                    temp_path = save_uploaded_file_to_temp(uploaded_audio)
+                    if temp_path:
+                        with st.spinner("Transcribing audio..."):
+                            transcript = transcribe_audio_file(temp_path, source_language=source_language)
+                        os.unlink(temp_path)
+
+                        if transcript and transcript.strip():
+                            st.markdown('<div class="section-title">Transcript</div>', unsafe_allow_html=True)
+                            st.text_area("Transcribed Text", transcript, height=150)
+
+                            st.markdown('<div class="section-title">Translations</div>', unsafe_allow_html=True)
+                            for lang in target_languages:
+                                st.markdown(f"**{lang}**")
+                                translated_text = translate_text(transcript, language_codes[lang])
+                                if translated_text:
+                                    st.markdown(f"<p>{translated_text}</p>", unsafe_allow_html=True)
+                                    if generate_audio:
+                                        audio_file = text_to_speech(translated_text, language_codes[lang])
+                                        if audio_file:
+                                            st.audio(audio_file)
+                                            os.unlink(audio_file)
+                                        else:
+                                            st.warning(f"Failed to generate audio for {lang}.")
+                                else:
+                                    st.warning(f"Failed to translate to {lang}.")
+                        else:
+                            st.warning("No transcript produced. Check the audio quality or backend availability.")
+
+        else:  # Text summary
+            uploaded_text = st.file_uploader("Upload a text file (.txt) containing the summary", type=["txt"])
+            manual_text = st.text_area("Or paste a summary here:", height=150)
+            target_languages = st.multiselect(
+                "Target languages for translation",
+                options=list(language_codes.keys()),
+                default=["English", "Arabic", "Urdu", "Korean"]
+            )
+            generate_audio = st.checkbox("Generate audio for translated text", value=True)
+
+            if st.button("Translate Text"):
+                text_content = None
+                if uploaded_text is not None:
+                    try:
+                        text_content = uploaded_text.read().decode("utf-8").strip()
+                    except Exception:
+                        st.error("Failed to read uploaded file as UTF-8.")
+                        text_content = None
+                if not text_content:
+                    text_content = manual_text.strip()
+
+                if not text_content:
+                    st.warning("Please upload a text file or paste some text.")
+                else:
+                    st.markdown('<div class="section-title">Original Text</div>', unsafe_allow_html=True)
+                    st.text_area("Original", text_content, height=150)
+
+                    st.markdown('<div class="section-title">Translations</div>', unsafe_allow_html=True)
+                    for lang in target_languages:
+                        st.markdown(f"**{lang}**")
+                        translated_text = translate_text(text_content, language_codes[lang])
+                        if translated_text:
+                            st.markdown(f"<p>{translated_text}</p>", unsafe_allow_html=True)
+                            if generate_audio:
+                                audio_file = text_to_speech(translated_text, language_codes[lang])
+                                if audio_file:
+                                    st.audio(audio_file)
+                                    os.unlink(audio_file)
+                                else:
+                                    st.warning(f"Failed to generate audio for {lang}.")
+                        else:
+                            st.warning(f"Failed to translate to {lang}.")
                     
     # Footer
     st.markdown('<div class="footer">Filmception - AI-powered Multilingual Movie Summary Translator and Genre Classifier</div>', unsafe_allow_html=True)
